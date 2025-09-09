@@ -1,0 +1,213 @@
+// Firestore Security Rules for Locki App
+// Copy these rules to your Firebase Console -> Firestore -> Rules
+
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // Helper functions
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+    
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+    
+    function isUserActive(userId) {
+      return get(/databases/$(database)/documents/users/$(userId)).data.isActive == true;
+    }
+    
+    function isBuddy(userId) {
+      return exists(/databases/$(database)/documents/buddyRelationships/$(request.auth.uid + '_' + userId)) ||
+             exists(/databases/$(database)/documents/buddyRelationships/$(userId + '_' + request.auth.uid));
+    }
+    
+    // Users collection
+    match /users/{userId} {
+      allow read: if isAuthenticated() && (
+        isOwner(userId) || 
+        resource.data.isProfilePublic == true ||
+        isBuddy(userId)
+      );
+      allow create: if isAuthenticated() && isOwner(userId) &&
+        request.resource.data.keys().hasAll(['username', 'displayName', 'email', 'isVerified', 'joinDate', 'lastActiveDate', 'isActive']);
+      allow update: if isAuthenticated() && isOwner(userId) &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['displayName', 'profession', 'bio', 'profilePictureData', 'isProfilePublic', 'allowsMessages', 'notificationsEnabled', 'lastActiveDate']);
+      allow delete: if false; // Prevent deletion, use soft delete instead
+    }
+    
+    // User stats collection
+    match /userStats/{userId} {
+      allow read: if isAuthenticated() && (
+        isOwner(userId) || 
+        isBuddy(userId)
+      );
+      allow create: if isAuthenticated() && isOwner(userId);
+      allow update: if isAuthenticated() && isOwner(userId);
+      allow delete: if false;
+    }
+    
+    // User settings collection
+    match /userSettings/{userId} {
+      allow read, write: if isAuthenticated() && isOwner(userId);
+      allow delete: if false;
+    }
+    
+    // Posts collection
+    match /posts/{postId} {
+      allow read: if isAuthenticated() && (
+        resource.data.visibility == 'public' ||
+        (resource.data.visibility == 'buddies_only' && (
+          isOwner(resource.data.userId) || 
+          isBuddy(resource.data.userId)
+        )) ||
+        (resource.data.visibility == 'private' && isOwner(resource.data.userId))
+      ) && resource.data.isActive == true;
+      
+      allow create: if isAuthenticated() && 
+        request.resource.data.userId == request.auth.uid &&
+        request.resource.data.keys().hasAll(['userId', 'username', 'title', 'description', 'hours', 'minutes', 'timestamp', 'isActive', 'likeCount', 'commentCount', 'shareCount', 'isLikedByUser', 'tags', 'visibility']) &&
+        request.resource.data.isActive == true &&
+        request.resource.data.likeCount == 0 &&
+        request.resource.data.commentCount == 0 &&
+        request.resource.data.shareCount == 0;
+        
+      allow update: if isAuthenticated() && 
+        isOwner(resource.data.userId) &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['title', 'description', 'tags', 'visibility', 'isActive']);
+        
+      allow delete: if false; // Use soft delete instead
+    }
+    
+    // Post likes collection
+    match /postLikes/{likeId} {
+      allow read: if isAuthenticated();
+      allow create: if isAuthenticated() && 
+        request.resource.data.userId == request.auth.uid &&
+        request.resource.data.keys().hasAll(['postId', 'userId', 'username', 'timestamp']);
+      allow delete: if isAuthenticated() && 
+        resource.data.userId == request.auth.uid;
+    }
+    
+    // Post comments collection
+    match /postComments/{commentId} {
+      allow read: if isAuthenticated() && resource.data.isActive == true;
+      allow create: if isAuthenticated() && 
+        request.resource.data.userId == request.auth.uid &&
+        request.resource.data.keys().hasAll(['postId', 'userId', 'username', 'content', 'timestamp', 'likeCount', 'isActive']) &&
+        request.resource.data.isActive == true &&
+        request.resource.data.likeCount == 0;
+      allow update: if isAuthenticated() && 
+        isOwner(resource.data.userId) &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['content', 'isActive']);
+      allow delete: if false; // Use soft delete instead
+    }
+    
+    // Buddy relationships collection
+    match /buddyRelationships/{relationshipId} {
+      allow read: if isAuthenticated() && (
+        resource.data.followerId == request.auth.uid ||
+        resource.data.followingId == request.auth.uid
+      );
+      allow create: if isAuthenticated() && 
+        request.resource.data.followerId == request.auth.uid &&
+        request.resource.data.keys().hasAll(['followerId', 'followerUsername', 'followingId', 'followingUsername', 'timestamp', 'isActive', 'isMutual']);
+      allow update: if isAuthenticated() && (
+        resource.data.followerId == request.auth.uid ||
+        resource.data.followingId == request.auth.uid
+      ) &&
+      request.resource.data.diff(resource.data).affectedKeys().hasOnly(['isActive', 'isMutual']);
+      allow delete: if false; // Use soft delete instead
+    }
+    
+    // Conversations collection
+    match /conversations/{conversationId} {
+      allow read, write: if isAuthenticated() && 
+        resource.data.participants.hasAny([request.auth.uid]);
+    }
+    
+    // Messages collection
+    match /messages/{messageId} {
+      allow read: if isAuthenticated() && (
+        resource.data.senderId == request.auth.uid ||
+        resource.data.receiverId == request.auth.uid
+      );
+      allow create: if isAuthenticated() && 
+        request.resource.data.senderId == request.auth.uid &&
+        request.resource.data.keys().hasAll(['conversationId', 'senderId', 'senderUsername', 'receiverId', 'receiverUsername', 'content', 'messageType', 'timestamp', 'isRead', 'isDelivered']);
+      allow update: if isAuthenticated() && 
+        resource.data.receiverId == request.auth.uid &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['isRead']);
+      allow delete: if false;
+    }
+    
+    // Notifications collection
+    match /notifications/{notificationId} {
+      allow read: if isAuthenticated() && 
+        resource.data.userId == request.auth.uid;
+      allow create: if isAuthenticated(); // Any authenticated user can create notifications
+      allow update: if isAuthenticated() && 
+        resource.data.userId == request.auth.uid &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['isRead']);
+      allow delete: if isAuthenticated() && 
+        resource.data.userId == request.auth.uid;
+    }
+    
+    // Achievements collection (read-only for users)
+    match /achievements/{achievementId} {
+      allow read: if isAuthenticated();
+      allow write: if false; // Only admins can manage achievements via Firebase console
+    }
+    
+    // User achievements collection
+    match /userAchievements/{userAchievementId} {
+      allow read: if isAuthenticated() && 
+        resource.data.userId == request.auth.uid;
+      allow create, update: if isAuthenticated() && 
+        request.resource.data.userId == request.auth.uid;
+      allow delete: if false;
+    }
+    
+    // Search history collection
+    match /searchHistory/{searchId} {
+      allow read, write: if isAuthenticated() && 
+        resource.data.userId == request.auth.uid;
+    }
+    
+    // User activity collection (for analytics)
+    match /userActivity/{activityId} {
+      allow read: if isAuthenticated() && 
+        resource.data.userId == request.auth.uid;
+      allow create: if isAuthenticated() && 
+        request.resource.data.userId == request.auth.uid;
+      allow update, delete: if false;
+    }
+  }
+}
+
+// Firebase Storage Security Rules
+// Copy these rules to your Firebase Console -> Storage -> Rules
+
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+    
+    // Profile images
+    match /profile_images/{userId}.jpg {
+      allow read: if true; // Profile images are public
+      allow write: if request.auth != null && request.auth.uid == userId;
+    }
+    
+    // Post images
+    match /post_images/{userId}/{imageId}.jpg {
+      allow read: if true; // Post images are public (for now, you might want to add more restrictions)
+      allow write: if request.auth != null && request.auth.uid == userId;
+    }
+    
+    // General rule - deny all other access
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}
